@@ -169,6 +169,77 @@ class Linter:
 
         return errors
 
+    def fix_file(self, filepath: str) -> Tuple[int, List[str]]:
+        path = Path(filepath)
+        if not path.exists() or path.suffix != '.py':
+            return 0, []
+
+        try:
+            content = path.read_text(encoding='utf-8')
+        except Exception:
+            return 0, []
+
+        lines = content.split('\n')
+        fixed = []
+        fixes_applied = []
+
+        for i, line in enumerate(lines):
+            original = line
+            if line.rstrip() != line:
+                line = line.rstrip()
+                fixes_applied.append(f'{filepath}:{i+1} Fixed trailing whitespace')
+            fixed.append(line)
+
+        new_content = '\n'.join(fixed)
+
+        if self.config['final_newline'] and new_content and not new_content.endswith('\n'):
+            new_content += '\n'
+            fixes_applied.append(f'{filepath}: Added final newline')
+
+        max_blank = self.config['max_blank_lines']
+        result_lines = new_content.split('\n')
+        compressed = []
+        blank_count = 0
+
+        for line in result_lines:
+            if not line.strip():
+                blank_count += 1
+                if blank_count <= max_blank:
+                    compressed.append(line)
+            else:
+                blank_count = 0
+                compressed.append(line)
+
+        if len(compressed) != len(result_lines):
+            fixes_applied.append(f'{filepath}: Reduced excessive blank lines')
+
+        new_content = '\n'.join(compressed)
+        if new_content and not new_content.endswith('\n') and self.config['final_newline']:
+            new_content += '\n'
+
+        if new_content != content:
+            path.write_text(new_content, encoding='utf-8')
+
+        return len(fixes_applied), fixes_applied
+
+    def fix_directory(self, dirpath: str, recursive: bool = True) -> Tuple[int, List[str]]:
+        total_fixes = 0
+        all_fixes = []
+        path = Path(dirpath)
+
+        if not path.exists():
+            return 0, []
+
+        pattern = '**/*.py' if recursive else '*.py'
+
+        for pyfile in path.glob(pattern):
+            if pyfile.is_file():
+                count, fixes = self.fix_file(str(pyfile))
+                total_fixes += count
+                all_fixes.extend(fixes)
+
+        return total_fixes, all_fixes
+
 
 def load_config(config_path: str) -> Dict:
     path = Path(config_path)

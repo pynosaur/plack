@@ -86,6 +86,12 @@ def main():
         help='Show documentation'
     )
 
+    parser.add_argument(
+        '--apply',
+        action='store_true',
+        help='Auto-fix issues (trailing whitespace, blank lines, final newline)'
+    )
+
     args = parser.parse_args()
 
     if args.version:
@@ -139,6 +145,31 @@ def main():
 
     recursive = not args.no_recursive
     linter = Linter(config)
+
+    if args.apply:
+        total_fixes = 0
+        all_fixes = []
+        for path in args.paths:
+            p = Path(path)
+            if p.is_file():
+                count, fixes = linter.fix_file(str(p))
+                total_fixes += count
+                all_fixes.extend(fixes)
+            elif p.is_dir():
+                count, fixes = linter.fix_directory(str(p), recursive=recursive)
+                total_fixes += count
+                all_fixes.extend(fixes)
+            else:
+                print(f'Warning: {path} not found', file=sys.stderr)
+
+        GREEN = '\033[32m'
+        RESET = '\033[0m'
+        if not args.quiet:
+            for fix in all_fixes:
+                print(f'{GREEN}Fixed:{RESET} {fix}')
+        print(f'\n{GREEN}{total_fixes} fixes applied{RESET}')
+        return 0
+
     all_errors = []
 
     for path in args.paths:
