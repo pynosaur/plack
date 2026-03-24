@@ -156,6 +156,12 @@ class Linter:
 
         return []
 
+    def _in_hidden_dir(self, filepath: Path) -> bool:
+        for part in filepath.parts:
+            if part.startswith('.') and part not in ('.', '..'):
+                return True
+        return False
+
     def lint_directory(self, dirpath: str, recursive: bool = True) -> List[LintError]:
         errors = []
         path = Path(dirpath)
@@ -166,7 +172,7 @@ class Linter:
         pattern = '**/*.py' if recursive else '*.py'
 
         for pyfile in path.glob(pattern):
-            if pyfile.is_file():
+            if pyfile.is_file() and not self._in_hidden_dir(pyfile):
                 errors.extend(self.lint_file(str(pyfile)))
 
         return errors
@@ -246,7 +252,7 @@ class Linter:
         pattern = '**/*.py' if recursive else '*.py'
 
         for pyfile in path.glob(pattern):
-            if pyfile.is_file():
+            if pyfile.is_file() and not self._in_hidden_dir(pyfile):
                 count, fixes = self.fix_file(str(pyfile))
                 total_fixes += count
                 all_fixes.extend(fixes)
