@@ -19,14 +19,46 @@ class SmartFormatter:
         lines = content.split('\n')
         result = []
         i = 0
+        in_docstring = False
+        docstring_quote = None
 
         while i < len(lines):
             line = lines[i]
-            if len(line) > self.max_length and not self._is_unfixable(line):
-                fixed, was_fixed = self._smart_break(line, i + 1)
-                if was_fixed:
-                    fixes.append(f'Line {i + 1}: Reformatted long line')
-                    result.extend(fixed.split('\n'))
+            stripped = line.strip()
+
+            # Track multi-line docstring state
+            if not in_docstring:
+                for q in ('"""', "'''"):
+                    if q in stripped:
+                        count = stripped.count(q)
+                        if count == 1:
+                            in_docstring = True
+                            docstring_quote = q
+                        break
+            else:
+                if docstring_quote in stripped:
+                    in_docstring = False
+                    docstring_quote = None
+
+            if len(line) > self.max_length:
+                if in_docstring:
+                    fixed = self._wrap_docstring_line(line)
+                    if fixed:
+                        fixes.append(
+                            f'Line {i + 1}: Reformatted long line'
+                        )
+                        result.extend(fixed.split('\n'))
+                    else:
+                        result.append(line)
+                elif not self._is_unfixable(line):
+                    fixed, was_fixed = self._smart_break(line, i + 1)
+                    if was_fixed:
+                        fixes.append(
+                            f'Line {i + 1}: Reformatted long line'
+                        )
+                        result.extend(fixed.split('\n'))
+                    else:
+                        result.append(line)
                 else:
                     result.append(line)
             else:
@@ -43,6 +75,9 @@ class SmartFormatter:
 
     def _is_unfixable(self, line: str) -> bool:
         stripped = line.strip()
+        for q in ('"""', "'''"):
+            if stripped.startswith(q) and stripped.endswith(q) and len(stripped) > 6:
+                return False
         if stripped.startswith(('"""', "'''")):
             return True
         if '"""' in stripped or "'''" in stripped:
@@ -135,6 +170,86 @@ class SmartFormatter:
             return None
         return '\n'.join(lines)
 
+    def _extract_inline_comment(self, line: str):
+        """Split line into (code_part, comment) or (line, None)."""
+        in_string = False
+        string_char = None
+        i = 0
+        while i < len(line):
+            c = line[i]
+            if c in '"\'':
+                if not in_string:
+                    in_string = True
+                    string_char = c
+                elif c == string_char:
+                    num_bs = 0
+                    j = i - 1
+                    while j >= 0 and line[j] == '\\':
+                        num_bs += 1
+                        j -= 1
+                    if num_bs % 2 == 0:
+                        in_string = False
+            elif not in_string and c == '#':
+                code_part = line[:i].rstrip()
+                comment = line[i:]
+                if code_part:
+                    return code_part, comment
+                break
+            i += 1
+        return line, None
+
+    def _break_docstring(self, line: str) -> Optional[str]:
+        indent = self._get_indent(line)
+        stripped = line.strip()
+        for q in ('"""', "'''"):
+            if stripped.startswith(q) and stripped.endswith(q) and len(stripped) > 6:
+                text = stripped[3:-3]
+                max_text = self.max_length - len(indent)
+                words = text.split()
+                lines = []
+                current = ''
+                for word in words:
+                    test = f'{current} {word}'.strip()
+                    if len(test) <= max_text:
+                        current = test
+                    else:
+                        if current:
+                            lines.append(current)
+                        current = word
+                if current:
+                    lines.append(current)
+                if not lines:
+                    return None
+                result = [f'{indent}{q}']
+                for ln in lines:
+                    result.append(f'{indent}{ln}')
+                result.append(f'{indent}{q}')
+                return '\n'.join(result)
+        return None
+
+    def _wrap_docstring_line(self, line: str) -> Optional[str]:
+        indent = self._get_indent(line)
+        text = line.strip()
+        max_text = self.max_length - len(indent)
+        if max_text <= 10:
+            return None
+        words = text.split()
+        lines = []
+        current = ''
+        for word in words:
+            test = f'{current} {word}'.strip()
+            if len(test) <= max_text:
+                current = test
+            else:
+                if current:
+                    lines.append(f'{indent}{current}')
+                current = word
+        if current:
+            lines.append(f'{indent}{current}')
+        if len(lines) <= 1:
+            return None
+        return '\n'.join(lines)
+
     def _break_long_part(
         self, part: str, indent: str, deep_indent: str,
         suffix: str,
@@ -221,7 +336,71 @@ class SmartFormatter:
                                 return result
         return None
 
+    def _try_break_for(self, line: str) -> Optional[str]:
+        indent = self._get_indent(line)
+        cont_indent = indent + ' ' * self.indent_size
+        stripped = line.strip()
+        match = re.match(r'^(for\s+.+?\s+in\s+)(.+):$', stripped)
+        if not match:
+            return None
+        prefix = match.group(1)
+        expr = match.group(2)
+        # Function call: sorted(...), enumerate(...)
+        call_match = re.match(
+            r'^(\w+(?:\.\w+)*)\((.*)\)$', expr, re.DOTALL,
+        )
+        if call_match:
+            func = call_match.group(1)
+            args_str = call_match.group(2)
+            args = self._smart_split(args_str, ',')
+            if len(args) >= 2:
+                lines = [f'{indent}{prefix}{func}(']
+                for i, arg in enumerate(args):
+                    suffix = ','
+                    lines.append(
+                        f'{cont_indent}{arg.strip()}{suffix}'
+                    )
+                lines.append(f'{indent}):')
+                result = '\n'.join(lines)
+                if self._validate(result):
+                    return result
+        # Tuple: (a, b, c)
+        tuple_match = re.match(r'^\((.+)\)$', expr)
+        if tuple_match:
+            items = self._smart_split(tuple_match.group(1), ',')
+            if len(items) >= 2:
+                lines = [f'{indent}{prefix}(']
+                for item in items:
+                    lines.append(f'{cont_indent}{item.strip()},')
+                lines.append(f'{indent}):')
+                result = '\n'.join(lines)
+                if self._validate(result):
+                    return result
+        # Generic: wrap expression in parens
+        result = (
+            f'{indent}{prefix}(\n'
+            f'{cont_indent}{expr}\n'
+            f'{indent}):'
+        )
+        if self._validate(result):
+            return result
+        return None
+
     def _smart_break(self, line: str, lineno: int) -> Tuple[str, bool]:
+        # Handle inline comments first
+        code_part, comment = self._extract_inline_comment(line)
+        if comment:
+            indent = self._get_indent(line)
+            comment_line = f'{indent}{comment}'
+            if len(code_part) <= self.max_length:
+                return f'{comment_line}\n{code_part}', True
+            fixed, was_fixed = self._break_code(code_part, lineno)
+            if was_fixed:
+                return f'{comment_line}\n{fixed}', True
+            return line, False
+        return self._break_code(line, lineno)
+
+    def _break_code(self, line: str, lineno: int) -> Tuple[str, bool]:
         indent = self._get_indent(line)
         cont_indent = indent + ' ' * self.indent_size
         stripped = line.strip()
@@ -231,6 +410,14 @@ class SmartFormatter:
             if result:
                 return result, True
             return line, False
+
+        # Single-line docstrings
+        for q in ('"""', "'''"):
+            if stripped.startswith(q) and stripped.endswith(q):
+                result = self._break_docstring(line)
+                if result:
+                    return result, True
+                return line, False
 
         if self._is_import(line):
             result = self._break_import(line)
@@ -247,6 +434,10 @@ class SmartFormatter:
         compound = self._try_break_compound(line)
         if compound:
             return compound, True
+
+        for_result = self._try_break_for(line)
+        if for_result:
+            return for_result, True
 
         try:
             tree = ast.parse(stripped)
@@ -536,6 +727,30 @@ class SmartFormatter:
                 for i in range(1, len(value_lines)):
                     value_lines[i] = indent + value_lines[i]
                 return '\n'.join(value_lines)
+
+        # Multi-target unpacking: a, b, c = func()
+        if ',' in target:
+            close_line = f'{indent}) = {value}'
+            if len(close_line) <= self.max_length:
+                targets_line = f'{cont_indent}{target}'
+                if len(targets_line) <= self.max_length:
+                    result = f'{indent}(\n{targets_line},\n{close_line}'
+                    if self._validate(result):
+                        return result
+
+        # Assignment with binary operators: x = A / B / C
+        for op in [' / ', ' + ', ' - ', ' * ', ' | ', ' & ']:
+            if op in value:
+                parts = self._smart_split(value, op.strip())
+                if len(parts) >= 2:
+                    lines = [f'{indent}{target} = (']
+                    for i, part in enumerate(parts):
+                        suffix = f' {op.strip()}' if i < len(parts) - 1 else ''
+                        lines.append(f'{cont_indent}{part.strip()}{suffix}')
+                    lines.append(f'{indent})')
+                    result = '\n'.join(lines)
+                    if self._validate(result):
+                        return result
 
         return None
 
@@ -842,6 +1057,15 @@ class SmartFormatter:
                 return True
             except SyntaxError:
                 pass
+            # elif/else need a preceding if block
+            first = lines[0].strip()
+            if first.startswith(('elif ', 'elif(', 'else:')):
+                patched = 'if True:\n    pass\n' + dedented + '\n    pass'
+                try:
+                    ast.parse(patched)
+                    return True
+                except SyntaxError:
+                    pass
         return False
 
 
