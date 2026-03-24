@@ -1,5 +1,6 @@
 import ast
 import re
+import textwrap
 from typing import List, Tuple, Optional
 
 
@@ -50,6 +51,62 @@ class SmartFormatter:
             return True
         return False
 
+    def _is_import(self, line: str) -> bool:
+        stripped = line.strip()
+        return stripped.startswith('from ') and ' import ' in stripped
+
+    def _break_import(self, line: str) -> Optional[str]:
+        stripped = line.strip()
+        indent = self._get_indent(line)
+        match = re.match(r'^(from\s+\S+\s+import\s+)(.+)$', stripped)
+        if not match:
+            return None
+
+        prefix = match.group(1)
+        names = [n.strip() for n in match.group(2).split(',')]
+        if len(names) < 2:
+            return None
+
+        cont_indent = indent + ' ' * self.indent_size
+        lines = [f'{indent}{prefix}(']
+        for name in names:
+            lines.append(f'{cont_indent}{name},')
+        lines.append(f'{indent})')
+        result = '\n'.join(lines)
+        if self._validate(result):
+            return result
+        return None
+
+    def _is_funcdef(self, line: str) -> bool:
+        stripped = line.strip()
+        return bool(re.match(r'^(async\s+)?def\s+\w+\(', stripped))
+
+    def _break_funcdef(self, line: str) -> Optional[str]:
+        indent = self._get_indent(line)
+        stripped = line.strip()
+        match = re.match(
+            r'^((async\s+)?def\s+\w+)\((.+)\)\s*(->\s*.+)?:\s*$',
+            stripped,
+        )
+        if not match:
+            return None
+
+        prefix = match.group(1)
+        params_str = match.group(3)
+        return_type = match.group(4)
+
+        params = self._smart_split(params_str, ',')
+        if len(params) < 2:
+            return None
+
+        cont_indent = indent + ' ' * self.indent_size
+        lines = [f'{indent}{prefix}(']
+        for param in params:
+            lines.append(f'{cont_indent}{param.strip()},')
+        suffix = f' {return_type}:' if return_type else ':'
+        lines.append(f'{indent}){suffix}')
+        return '\n'.join(lines)
+
     def _get_indent(self, line: str) -> str:
         return line[:len(line) - len(line.lstrip())]
 
@@ -57,6 +114,18 @@ class SmartFormatter:
         indent = self._get_indent(line)
         cont_indent = indent + ' ' * self.indent_size
         stripped = line.strip()
+
+        if self._is_import(line):
+            result = self._break_import(line)
+            if result:
+                return result, True
+            return line, False
+
+        if self._is_funcdef(line):
+            result = self._break_funcdef(line)
+            if result:
+                return result, True
+            return line, False
 
         try:
             tree = ast.parse(stripped)
@@ -86,6 +155,10 @@ class SmartFormatter:
             if result and self._validate(result):
                 return result, True
 
+        result = self._break_string_arg(line, indent, cont_indent)
+        if result and self._validate(result):
+            return result, True
+
         return line, False
 
     def _format_node(self, node: ast.AST, indent: str, cont_indent: str) -> Optional[str]:
@@ -99,6 +172,22 @@ class SmartFormatter:
             return self._format_dict(node, indent, cont_indent)
         if isinstance(node, ast.BoolOp):
             return self._format_boolop(node, indent, cont_indent)
+        if isinstance(node, ast.Raise) and node.exc:
+            return self._format_raise(node, indent, cont_indent)
+        return None
+
+    def _format_raise(self, node: ast.Raise, indent: str, cont_indent: str) -> Optional[str]:
+        if isinstance(node.exc, ast.Call):
+            call_result = self._format_call(
+                node.exc, indent, cont_indent
+            )
+            if call_result:
+                lines = call_result.split('\n')
+                lines[0] = f'{indent}raise {lines[0].lstrip()}'
+                result = '\n'.join(lines)
+                if node.cause:
+                    result += f' from {ast.unparse(node.cause)}'
+                return result
         return None
 
     def _format_call(self, node: ast.Call, indent: str, cont_indent: str) -> Optional[str]:
@@ -119,7 +208,29 @@ class SmartFormatter:
         lines = [f'{indent}{func_str}(']
         for i, arg in enumerate(args):
             suffix = ',' if i < len(args) - 1 else ','
-            lines.append(f'{cont_indent}{arg}{suffix}')
+            arg_line = f'{cont_indent}{arg}{suffix}'
+            if len(arg_line) > self.max_length and len(args) == 1:
+                str_match = re.match(r'^(["\'])(.+)\1$', arg)
+                fstr_match = re.match(r'^(f["\'])(.+)(["\'])$', arg)
+                if str_match:
+                    q = str_match.group(1)
+                    avail = self.max_length - len(cont_indent) - len(q) - 1
+                    chunks = self._split_string_at(str_match.group(2), avail)
+                    if len(chunks) >= 2:
+                        for chunk in chunks:
+                            lines.append(f'{cont_indent}{q}{chunk}{q}')
+                        lines.append(f'{indent})')
+                        return '\n'.join(lines)
+                elif fstr_match:
+                    q = fstr_match.group(3)
+                    avail = self.max_length - len(cont_indent) - 2 - 1
+                    chunks = self._split_fstring_at(fstr_match.group(2), avail)
+                    if len(chunks) >= 2:
+                        for chunk in chunks:
+                            lines.append(f'{cont_indent}f{q}{chunk}{q}')
+                        lines.append(f'{indent})')
+                        return '\n'.join(lines)
+            lines.append(arg_line)
         lines.append(f'{indent})')
 
         return '\n'.join(lines)
@@ -357,6 +468,107 @@ class SmartFormatter:
             return '\n'.join(lines)
         return None
 
+    def _break_string_arg(self, line: str, indent: str, cont_indent: str) -> Optional[str]:
+        stripped = line.strip()
+        match = re.match(
+            r'^(.*?\()(["\'])(.*)\2(\).*?)$',
+            stripped,
+        )
+        if not match:
+            match = re.match(
+                r'^(.*?\()(f["\'])(.*?)(["\'])\s*(\).*?)$',
+                stripped,
+            )
+            if match:
+                return self._split_fstring_arg(
+                    match, indent, cont_indent
+                )
+            return None
+
+        prefix = match.group(1)
+        quote = match.group(2)
+        text = match.group(3)
+        suffix = match.group(4)
+
+        avail = self.max_length - len(cont_indent) - len(quote) - 1
+        if avail < 20:
+            return None
+
+        chunks = self._split_string_at(text, avail)
+        if len(chunks) < 2:
+            return None
+
+        lines = [f'{indent}{prefix}']
+        for chunk in chunks:
+            lines.append(f'{cont_indent}{quote}{chunk}{quote}')
+        lines.append(f'{indent}{suffix}')
+        return '\n'.join(lines)
+
+    def _split_fstring_arg(self, match, indent: str, cont_indent: str) -> Optional[str]:
+        prefix = match.group(1)
+        fquote = match.group(2)
+        text = match.group(3)
+        close_quote = match.group(4)
+        suffix = match.group(5)
+
+        avail = self.max_length - len(cont_indent) - len(fquote) - 1
+        if avail < 20:
+            return None
+
+        chunks = self._split_fstring_at(text, avail)
+        if len(chunks) < 2:
+            return None
+
+        lines = [f'{indent}{prefix}']
+        for chunk in chunks:
+            lines.append(f'{cont_indent}f{close_quote}{chunk}{close_quote}')
+        lines.append(f'{indent}{suffix}')
+        return '\n'.join(lines)
+
+    def _split_string_at(self, text: str, width: int) -> List[str]:
+        if len(text) <= width:
+            return [text]
+
+        chunks = []
+        while text:
+            if len(text) <= width:
+                chunks.append(text)
+                break
+            pos = text.rfind(' ', 0, width)
+            if pos == -1:
+                pos = width
+            else:
+                pos += 1
+            chunks.append(text[:pos])
+            text = text[pos:]
+        return chunks
+
+    def _split_fstring_at(self, text: str, width: int) -> List[str]:
+        if len(text) <= width:
+            return [text]
+
+        chunks = []
+        while text:
+            if len(text) <= width:
+                chunks.append(text)
+                break
+            pos = -1
+            depth = 0
+            for i, c in enumerate(text[:width]):
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                elif c == ' ' and depth == 0:
+                    pos = i
+            if pos == -1:
+                pos = width
+            else:
+                pos += 1
+            chunks.append(text[:pos])
+            text = text[pos:]
+        return chunks
+
     def _smart_split(self, s: str, delimiter: str) -> List[str]:
         parts = []
         current = ''
@@ -399,7 +611,7 @@ class SmartFormatter:
 
     def _validate(self, code: str) -> bool:
         try:
-            ast.parse(code)
+            ast.parse(textwrap.dedent(code))
             return all(len(line) <= self.max_length for line in code.split('\n'))
         except SyntaxError:
             return False

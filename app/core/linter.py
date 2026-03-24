@@ -202,12 +202,24 @@ class Linter:
         lines = content.split('\n')
         fixed = []
         fixes_applied = []
+        indent_size = self.config['indent_size']
+        use_tabs = self.config['tab_indent']
 
         for i, line in enumerate(lines):
             original = line
             if line.rstrip() != line:
                 line = line.rstrip()
                 fixes_applied.append(f'{filepath}:{i+1} Fixed trailing whitespace')
+            if line.strip() and not use_tabs:
+                leading = len(line) - len(line.lstrip())
+                if leading > 0 and '\t' not in line[:leading]:
+                    remainder = leading % indent_size
+                    if remainder != 0:
+                        new_leading = leading + (indent_size - remainder)
+                        line = ' ' * new_leading + line.lstrip()
+                        fixes_applied.append(
+                            f'{filepath}:{i+1} Fixed indentation'
+                        )
             fixed.append(line)
 
         new_content = '\n'.join(fixed)
