@@ -1,3 +1,4 @@
+import ast
 import os
 import re
 from pathlib import Path
@@ -58,6 +59,7 @@ class Linter:
         errors.extend(self._check_blank_lines(filepath, lines))
         errors.extend(self._check_indentation(filepath, lines))
         errors.extend(self._check_final_newline(filepath, content))
+        errors.extend(self._check_syntax(filepath, content))
 
         return sorted(errors, key=lambda e: (e.line, e.col))
 
@@ -154,6 +156,16 @@ class Linter:
                 'No newline at end of file'
             )]
 
+        return []
+
+    def _check_syntax(self, filepath: str, content: str) -> List[LintError]:
+        try:
+            ast.parse(content, filename=filepath)
+        except SyntaxError as e:
+            line = e.lineno or 1
+            col = e.offset or 1
+            msg = e.msg if e.msg else 'Syntax error'
+            return [LintError(filepath, line, col, 'S001', msg)]
         return []
 
     def _in_hidden_dir(self, filepath: Path) -> bool:
