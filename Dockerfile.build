@@ -1,0 +1,27 @@
+FROM python:3.11-slim AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc patchelf ccache && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir nuitka ordered-set zstandard
+
+WORKDIR /src
+COPY app/ app/
+COPY doc/ doc/
+
+ARG TOOL_NAME=plack
+
+RUN python -m nuitka \
+    --onefile \
+    --include-data-dir=doc=doc \
+    --onefile-tempdir-spec=/tmp/nuitka-${TOOL_NAME} \
+    --no-progressbar \
+    --assume-yes-for-downloads \
+    --output-filename=${TOOL_NAME}-linux-amd64 \
+    app/main.py
+
+FROM scratch
+ARG TOOL_NAME=plack
+COPY --from=builder /src/${TOOL_NAME}-linux-amd64 /
