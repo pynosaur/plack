@@ -16,8 +16,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-13
-            target: darwin-x86_64
           - os: macos-14
             target: darwin-arm64
           - os: ubuntu-latest
