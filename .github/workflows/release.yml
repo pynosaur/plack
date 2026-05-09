@@ -7,6 +7,7 @@ on:
       - 'app/**'
       - 'doc/**'
       - '.program'
+  workflow_dispatch:
 
 permissions:
   contents: write
