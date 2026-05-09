@@ -66,13 +66,38 @@ class Linter:
     def _check_line_length(self, filepath: str, lines: List[str]) -> List[LintIssue]:
         issues = []
         max_len = self.config['line_length']
+        breaker = LineBreaker(max_len, self.config['indent_size'])
+
+        in_docstring = False
+        docstring_quote = None
+        bracket_depth = 0
 
         for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+
+            if not in_docstring:
+                for q in ('"""', "'''"):
+                    if q in stripped:
+                        if stripped.count(q) == 1:
+                            in_docstring = True
+                            docstring_quote = q
+                        break
+            else:
+                if docstring_quote and docstring_quote in stripped:
+                    in_docstring = False
+                    docstring_quote = None
+
+            is_continuation = bracket_depth > 0
+
+            if not in_docstring:
+                bracket_depth += breaker.count_brackets(line)
+
             if len(line) > max_len:
-                issues.append(LintIssue(
-                    filepath, i, max_len + 1, 'L001',
-                    f'Line too long ({len(line)} > {max_len})'
-                ))
+                if breaker.can_fix_line(line, in_docstring, is_continuation):
+                    issues.append(LintIssue(
+                        filepath, i, max_len + 1, 'L001',
+                        f'Line too long ({len(line)} > {max_len})',
+                    ))
 
         return issues
 

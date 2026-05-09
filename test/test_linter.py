@@ -36,7 +36,7 @@ class TestLinter(unittest.TestCase):
         self.assertEqual(len(line_issues), 0)
 
     def test_line_length_exceeded(self):
-        code = 'x = "' + 'a' * 100 + '"\n'
+        code = 'result = some_function(argument_one, argument_two, argument_three, argument_four, argument_five)\n'
         path = self.write_temp_file(code)
         issues = self.linter.lint_file(path)
         line_issues = [e for e in issues if e.code == 'L001']
@@ -116,8 +116,8 @@ class TestLinter(unittest.TestCase):
         self.assertEqual(len(issues), 0)
 
     def test_custom_config(self):
-        linter = Linter({'line_length': 10})
-        code = '12345678901234567890\n'
+        linter = Linter({'line_length': 40})
+        code = '# this is a long comment that should be reported by the linter\n'
         path = self.write_temp_file(code)
         issues = linter.lint_file(path)
         line_issues = [e for e in issues if e.code == 'L001']

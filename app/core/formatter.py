@@ -21,12 +21,12 @@ class SmartFormatter:
         i = 0
         in_docstring = False
         docstring_quote = None
+        bracket_depth = 0
 
         while i < len(lines):
             line = lines[i]
             stripped = line.strip()
 
-            # Track multi-line docstring state
             if not in_docstring:
                 for q in ('"""', "'''"):
                     if q in stripped:
@@ -40,6 +40,11 @@ class SmartFormatter:
                     in_docstring = False
                     docstring_quote = None
 
+            is_continuation = bracket_depth > 0
+
+            if not in_docstring:
+                bracket_depth += self._count_brackets(line)
+
             if len(line) > self.max_length:
                 if in_docstring:
                     fixed = self._wrap_docstring_line(line)
@@ -50,7 +55,11 @@ class SmartFormatter:
                         result.extend(fixed.split('\n'))
                     else:
                         result.append(line)
-                elif not self._is_unfixable(line):
+                elif self._is_unfixable(line):
+                    result.append(line)
+                elif is_continuation:
+                    result.append(line)
+                else:
                     fixed, was_fixed = self._smart_break(line, i + 1)
                     if was_fixed:
                         fixes.append(
@@ -59,8 +68,6 @@ class SmartFormatter:
                         result.extend(fixed.split('\n'))
                     else:
                         result.append(line)
-                else:
-                    result.append(line)
             else:
                 result.append(line)
             i += 1
@@ -72,6 +79,38 @@ class SmartFormatter:
             return new_content, fixes
         except SyntaxError:
             return content, []
+
+    def _count_brackets(self, line: str) -> int:
+        """Return net bracket change for a line, ignoring strings."""
+        depth = 0
+        in_str = False
+        str_char = None
+        i = 0
+        while i < len(line):
+            c = line[i]
+            if c in '"\'':
+                if not in_str:
+                    if line[i:i + 3] in ('"""', "'''"):
+                        return depth
+                    in_str = True
+                    str_char = c
+                elif c == str_char:
+                    bs = 0
+                    j = i - 1
+                    while j >= 0 and line[j] == '\\':
+                        bs += 1
+                        j -= 1
+                    if bs % 2 == 0:
+                        in_str = False
+            elif not in_str:
+                if c == '#':
+                    break
+                if c in '([{':
+                    depth += 1
+                elif c in ')]}':
+                    depth -= 1
+            i += 1
+        return depth
 
     def _is_unfixable(self, line: str) -> bool:
         stripped = line.strip()
@@ -387,11 +426,16 @@ class SmartFormatter:
         return None
 
     def _smart_break(self, line: str, lineno: int) -> Tuple[str, bool]:
-        # Handle inline comments first
         code_part, comment = self._extract_inline_comment(line)
         if comment:
             indent = self._get_indent(line)
             comment_line = f'{indent}{comment}'
+            if len(comment_line) > self.max_length:
+                broken_comment = self._break_comment(comment_line)
+                if broken_comment:
+                    comment_line = broken_comment
+                else:
+                    return line, False
             if len(code_part) <= self.max_length:
                 return f'{comment_line}\n{code_part}', True
             fixed, was_fixed = self._break_code(code_part, lineno)
@@ -491,6 +535,8 @@ class SmartFormatter:
             return self._format_boolop(node, indent, cont_indent)
         if isinstance(node, ast.Raise) and node.exc:
             return self._format_raise(node, indent, cont_indent)
+        if isinstance(node, ast.Return) and node.value:
+            return self._format_return(node, indent, cont_indent)
         return None
 
     def _format_raise(
@@ -511,6 +557,31 @@ class SmartFormatter:
                     result += f' from {ast.unparse(node.cause)}'
                 return result
         return None
+
+    def _format_return(
+        self,
+        node: ast.Return,
+        indent: str,
+        cont_indent: str,
+    ) -> Optional[str]:
+        value = node.value
+        inner = ' ' * self.indent_size
+        result = None
+        if isinstance(value, ast.Call):
+            result = self._format_call(value, '', inner)
+        elif isinstance(value, ast.BoolOp):
+            result = self._format_boolop(value, '', inner)
+        elif isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+            result = self._format_collection(value, '', inner)
+        elif isinstance(value, ast.Dict):
+            result = self._format_dict(value, '', inner)
+        if not result:
+            return None
+        lines = result.split('\n')
+        lines[0] = f'{indent}return {lines[0].lstrip()}'
+        for i in range(1, len(lines)):
+            lines[i] = indent + lines[i]
+        return '\n'.join(lines)
 
     def _format_call(
         self,
@@ -1069,6 +1140,25 @@ class SmartFormatter:
         return False
 
 
+    def can_fix_line(
+        self,
+        line: str,
+        in_docstring: bool = False,
+        is_continuation: bool = False,
+    ) -> bool:
+        """Check whether the formatter can shorten this line."""
+        if len(line) <= self.max_length:
+            return True
+        if in_docstring:
+            return self._wrap_docstring_line(line) is not None
+        if self._is_unfixable(line):
+            return False
+        if is_continuation:
+            return False
+        _, was_fixed = self._smart_break(line, 0)
+        return was_fixed
+
+
 class LineBreaker:
     def __init__(self, max_length: int = 88, indent_size: int = 4):
         self._formatter = SmartFormatter(max_length, indent_size)
@@ -1077,3 +1167,16 @@ class LineBreaker:
 
     def fix_long_lines(self, content: str) -> Tuple[str, List[str]]:
         return self._formatter.format_file(content)
+
+    def can_fix_line(
+        self,
+        line: str,
+        in_docstring: bool = False,
+        is_continuation: bool = False,
+    ) -> bool:
+        return self._formatter.can_fix_line(
+            line, in_docstring, is_continuation,
+        )
+
+    def count_brackets(self, line: str) -> int:
+        return self._formatter._count_brackets(line)
