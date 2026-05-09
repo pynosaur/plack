@@ -13,18 +13,22 @@ from app import __version__
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _read_program_field(field):
+    text = (REPO_ROOT / ".program").read_text()
+    for line in text.splitlines():
+        if line.startswith(f"{field}:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
 class TestVersionConsistency(unittest.TestCase):
     """All version references must match. CI catches drift."""
 
-    def _read_program_version(self):
-        text = (REPO_ROOT / ".program").read_text()
-        for line in text.splitlines():
-            if line.startswith("version:"):
-                return line.split(":", 1)[1].strip()
-        self.fail(".program has no version field")
-
     def _read_doc_version(self):
-        doc_file = REPO_ROOT / "doc" / "blue.yaml"
+        name = _read_program_field("name")
+        self.assertIsNotNone(name, ".program has no name field")
+        doc_file = REPO_ROOT / "doc" / f"{name}.yaml"
+        self.assertTrue(doc_file.exists(), f"doc/{name}.yaml not found")
         text = doc_file.read_text()
         for line in text.splitlines():
             stripped = line.strip()
@@ -33,7 +37,7 @@ class TestVersionConsistency(unittest.TestCase):
                 if val.startswith('"') and val.endswith('"'):
                     val = val[1:-1]
                 return val
-        self.fail("doc/blue.yaml has no VERSION field")
+        self.fail(f"doc/{name}.yaml has no VERSION field")
 
     def _read_readme_version(self):
         readme = REPO_ROOT / "README.md"
@@ -44,7 +48,8 @@ class TestVersionConsistency(unittest.TestCase):
         return match.group(1).strip() if match else None
 
     def test_all_versions_match(self):
-        program_v = self._read_program_version()
+        program_v = _read_program_field("version")
+        self.assertIsNotNone(program_v, ".program has no version field")
         doc_v = self._read_doc_version()
         readme_v = self._read_readme_version()
         init_v = __version__
